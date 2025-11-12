@@ -25,6 +25,63 @@ button:hover{filter:brightness(1.08)}
 .entry{margin:6px 0;padding:8px;border-radius:8px;border:1px solid #2a3a6a;cursor:pointer}
 .entry.active{outline:2px solid var(--focus)}
 .entry.win{background:#0e1f3d}
+.bracket {
+  display: flex;
+  justify-content: space-between;
+  gap: 40px;
+  overflow-x: auto;
+  padding: 20px 0;
+}
+
+.round {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-around;
+  gap: 40px;
+  position: relative;
+}
+
+.match {
+  background: #111a33;
+  border: 1px solid #1d274a;
+  border-radius: 10px;
+  padding: 10px;
+  width: 180px;
+  text-align: center;
+  position: relative;
+}
+
+.entry {
+  margin: 6px 0;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #2a3a6a;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.entry:hover {
+  background-color: #182550;
+}
+
+.entry.win {
+  background-color: #1b295a;
+  border-color: #3b82f6;
+  box-shadow: 0 0 6px rgba(59,130,246,0.5);
+}
+
+.round::after {
+  content: '';
+  position: absolute;
+  right: -20px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #25325c;
+}
+.round:last-child .match { box-shadow: 0 0 0 2px rgba(125,211,252,.25) inset; }
+.round:last-child .entry.win { box-shadow: 0 0 10px rgba(125,211,252,.45); }
 </style>
 </head>
 <body>
@@ -103,8 +160,55 @@ const seed = strHash(seedStr);
 const shuffled = seededShuffle(entries, seed);
 // power-of-two pad
 let n=1; while(n<shuffled.length) n<<=1;
-const byes = Array(n - shuffled.length).fill(null);
-const round0 = shuffled.concat(byes).map(x => ({entry:x, win:null}));
+
+// === BEGIN random bye distribution (no bye-vs-bye in Round 1) ===
+const byeCount = n - shuffled.length;
+
+// Edge case: if no byes, just fill straight across
+if (byeCount === 0) {
+  const round0 = Array.from({length:n}, (_,i) => ({
+    entry: shuffled[i] ?? null,
+    win: null
+  }));
+  // (existing, do not delete)
+  const rounds = [round0];
+  return rounds; // short-circuit
+}
+
+// We’ll choose distinct first-round *pairs* to host byes,
+// then pick a random side within each chosen pair.
+
+// number of first-round pairs
+const pairCount = n / 2;
+
+// Build [0..pairCount-1], shuffle with seed
+const pairIdxs = Array.from({length: pairCount}, (_,i)=>i);
+const shuffledPairs = seededShuffle(pairIdxs, seed ^ 0x9e3779b9);
+
+// Select the first `byeCount` pairs (guarantees ≤ 1 bye per pair)
+const chosenPairs = new Set(shuffledPairs.slice(0, byeCount));
+
+// Decide a side (top=0 or bottom=1) per chosen pair, using seeded RNG
+const rng = mulberry32(seed ^ 0x85ebca6b);
+const byeSlots = new Set();
+chosenPairs.forEach(p => {
+  const side = (rng() < 0.5 ? 0 : 1);
+  const slotIndex = p * 2 + side; // map pair→slot
+  byeSlots.add(slotIndex);
+});
+
+// Fill slots: put null in bye slots, and stream entries into the rest
+const round0 = Array.from({length:n}, (_,i) => byeSlots.has(i) ? null : 'FILL');
+const entriesIter = shuffled[Symbol.iterator]();
+for (let i = 0; i < n; i++) {
+  if (round0[i] === 'FILL') round0[i] = entriesIter.next().value ?? null;
+}
+
+// Wrap into node objects
+for (let i = 0; i < n; i++) round0[i] = { entry: round0[i], win: null };
+// === END random bye distribution (no bye-vs-bye in Round 1) ===
+
+
 const rounds = [round0];
 while(rounds[rounds.length-1].length>1){
 const prev = rounds[rounds.length-1];
@@ -133,9 +237,32 @@ cols.push(cur);
 }
 
 
-function label(node){ return node?.entry ?? '— bye —'; }
-function isBye(node){ return node?.entry==null; }
+function isEmpty(node){ return node === 'undefined'; }          // not decided/placed yet
+function isBye(node){ return node && node.entry === null; }   // explicit bye
+function hasEntry(node){ return node && node.entry != null; } // real name present
 
+function label(node){
+  // undefined → blank (pending); null → "— bye —"; otherwise the entry string
+  if (isEmpty(node)) return '';
+  if (isBye(node)) return '— bye —';
+  if (!node || node.entry === undefined || node.entry === null) return '';
+  return String(node.entry ?? '');
+}
+
+function placeWinner(roundIdx, matchIdx, winnerLabel){
+  const nextCol = cols[roundIdx + 1];
+  if (!nextCol) return;                          // no next round
+  const nextMatch = nextCol[Math.floor(matchIdx / 2)];
+  const side = (matchIdx % 2 === 0) ? 'a' : 'b'; // even → a, odd → b
+  nextMatch[side] = { entry: winnerLabel, pick: null };
+}
+
+function pickAndAdvance(roundIdx, matchIdx, pickSide, m){
+  m.pick = pickSide;
+  const winnerLabel = label(pickSide === 'a' ? m.a : m.b);
+  placeWinner(roundIdx, matchIdx, winnerLabel);
+  update();
+}
 
 function update(){
 rootEl.innerHTML='';
@@ -147,25 +274,54 @@ const e1 = document.createElement('div'); e1.className='entry'; e1.textContent =
 const e2 = document.createElement('div'); e2.className='entry'; e2.textContent = label(m.b);
 
 
-if (isBye(m.a)) { m.pick = 'b'; }
-if (isBye(m.b)) { m.pick = 'a'; }
+if (isBye(m.a) && hasEntry(m.b)) m.pick = 'b';
+if (isBye(m.b) && hasEntry(m.a)) m.pick = 'a';
+
+// If a pick exists (either by user click or valid bye auto-pick), advance winner
+if (m.pick === 'a' || m.pick === 'b') {
+  placeWinner(colIdx, i, label(m[m.pick]));
+}
+
+// apply selected styles
+if (m.pick === 'a') e1.classList.add('win');
+if (m.pick === 'b') e2.classList.add('win');
+
+// click → set pick and advance (even index → nextMatch.a, odd index → nextMatch.b)
+e1.onclick = () => pickAndAdvance(colIdx, i, 'a', m);
+e2.onclick = () => pickAndAdvance(colIdx, i, 'b', m);
 
 
-if (m.pick==='a') e1.classList.add('win');
-if (m.pick==='b') e2.classList.add('win');
+const isFinal = (colIdx === cols.length - 1);
+const heading = isFinal ? 'Champion' : `Round ${colIdx+1}`;
+card.innerHTML = `<div class="seed">${heading}</div>`;
 
+// === BEGIN champion render logic (single slot only if other side is bye/pending) ===
+const aHas = hasEntry(m.a);      // real name
+const bHas = hasEntry(m.b);
+const aBye = isBye(m.a);
+const bBye = isBye(m.b);
 
-e1.onclick=()=>{ m.pick='a';
-// push winner down to next column
-if (cols[colIdx+1]) cols[colIdx+1][Math.floor(i/2)].a = {entry: label(m.a), pick:null};
-update(); };
-e2.onclick=()=>{ m.pick='b';
-if (cols[colIdx+1]) cols[colIdx+1][Math.floor(i/2)].a = {entry: label(m.b), pick:null};
-update(); };
+// final should be single-slot only if exactly one side is a real entry,
+// and the other side is either a bye or still pending (undefined)
+const singleFinal = isFinal && (
+  (aHas && !bHas) || (bHas && !aHas) || (aHas && bBye) || (bHas && aBye)
+);
 
+if (singleFinal) {
+  const winnerName =
+    (m.pick === 'a' && aHas) ? label(m.a) :
+    (m.pick === 'b' && bHas) ? label(m.b) :
+    aHas ? label(m.a) : bHas ? label(m.b) : '';
 
-card.innerHTML = `<div class="seed">Round ${colIdx+1}</div>`;
-card.appendChild(e1); card.appendChild(e2);
+  const single = document.createElement('div');
+  single.className = 'entry win';
+  single.textContent = winnerName || '';
+  card.appendChild(single);
+} else {
+  // normal: show both sides so user can click a final
+  card.appendChild(e1);
+  card.appendChild(e2);
+}
 col.appendChild(card);
 });
 rootEl.appendChild(col);
@@ -175,42 +331,126 @@ update();
 
 
 return {
-getWinner(){ const last = cols[cols.length-1][0]; return last?.pick==='a' ? label(last.a) : (last?.pick==='b' ? label(last.b) : null);},
-getRanking(){
-// derive ranking via elimination round (winner → last)
-const entries = new Set(); cols[0].forEach(m=>{ if(m.a.entry) entries.add(m.a.entry); if(m.b.entry) entries.add(m.b.entry); });
-const rank = [];
-const losersByRound = [];
-// Walk from first to penultimate rounds to collect losers
-cols.forEach((matches)=>{
-const losers=[]; matches.forEach(m=>{
-if(m.pick==='a' && m.b.entry) losers.push(m.b.entry);
-else if(m.pick==='b' && m.a.entry) losers.push(m.a.entry);
-});
-losersByRound.push(losers);
-});
-const winner = this.getWinner();
-if (winner) rank.push(winner);
-// finalist (last round loser)
-const lastRound = losersByRound[losersByRound.length-1]||[];
-if(lastRound[0]) rank.push(lastRound[0]);
-// others by earlier rounds (those who lost later rank higher)
-for(let i=losersByRound.length-2; i>=0; i--){ rank.push(...losersByRound[i]); }
-// Ensure we included byes? byes never in entries set; ranking remains for real entries only
-// Add any missing entries at end just in case
-entries.forEach(e=>{ if(!rank.includes(e)) rank.push(e); });
-return rank;
+getWinner(){
+  const last = cols[cols.length - 1][0];
+  if (!last) return null;
+
+  if (last.pick === 'a') return label(last.a) || null;
+  if (last.pick === 'b') return label(last.b) || null;
+
+  const aHas = hasEntry(last.a);
+  const bHas = hasEntry(last.b);
+  const aBye = isBye(last.a);
+  const bBye = isBye(last.b);
+
+  // If exactly one real entry exists (other side pending or bye), that entry is champ
+  if (aHas && (!bHas || bBye)) return label(last.a) || null;
+  if (bHas && (!aHas || aBye)) return label(last.b) || null;
+
+  return null; // both sides pending or both real but no pick yet
 },
+getRanking(){
+// Round-1 entries (ground truth universe)
+const round1Entries = cols[0].flatMap(m => {
+    const a = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
+    const b = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
+    return [a, b].filter(x => x !== null);
+});
+
+// Collect losers per round (ignore pending and byes)
+const losersByRound = cols.map(matches => {
+    const losers = [];
+    matches.forEach(m => {
+    const aName = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
+    const bName = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
+
+    if (m.pick === 'a' && bName !== null) losers.push(bName);
+    else if (m.pick === 'b' && aName !== null) losers.push(aName);
+    });
+    return losers;
+});
+
+const out = [];
+const champ = this.getWinner();
+if (champ) out.push(champ);
+
+// Finalist (loser of the last round), if any
+const finalLosers = losersByRound[losersByRound.length - 1] || [];
+if (finalLosers[0]) out.push(finalLosers[0]);
+
+// Earlier rounds losers: later-round losers rank higher
+for (let r = losersByRound.length - 2; r >= 0; r--) {
+    losersByRound[r].forEach(name => { if (!out.includes(name)) out.push(name); });
+}
+
+// Add any still-missing round-1 entries at the end (e.g., unplayed when user stops early)
+round1Entries.forEach(name => { if (name && !out.includes(name)) out.push(name); });
+
+return out;
+},
+// === END robust ranking ===
+
 serialize(){ return cols; }
 };
 }
 
 
-function scoreFromRanking(ranking){
-// winner gets N, runner-up N-1, others descend by elimination round; tie-breakers implicit by round depth
-const N = ranking.length; const map={};
-ranking.forEach((name, i)=>{ map[name] = N - i; });
-return map;
+function scoreFromRanking(_ranking, cols){
+  // === BEGIN round-based scoring (2^(roundReached-1)) ===
+  // Lose in Round 1 → 1, Round 2 → 2, Round 3 → 4, … Champion (final round R) → 2^(R-1)
+  const totalRounds = cols.length;
+  const roundReached = new Map(); // name -> highest round reached (1-based)
+  const namesFrom = m => {
+    const a = (m && m.a && m.a.entry != null) ? String(m.a.entry) : null;
+    const b = (m && m.b && m.b.entry != null) ? String(m.b.entry) : null;
+    return {a,b};
+  };
+
+  // Start everyone we see in Round 1 at least at round 1
+  (cols[0] || []).forEach(m => {
+    const {a,b} = namesFrom(m);
+    if (a) roundReached.set(a, Math.max(1, roundReached.get(a) || 0));
+    if (b) roundReached.set(b, Math.max(1, roundReached.get(b) || 0));
+  });
+
+  // For each decided match:
+  //  - loser reached this round (rIdx+1)
+  //  - winner reached at least next round (rIdx+2)
+  cols.forEach((round, rIdx) => {
+    round.forEach(m => {
+      const {a,b} = namesFrom(m);
+      if (m.pick === 'a' || m.pick === 'b') {
+        const winner = (m.pick === 'a') ? a : b;
+        const loser  = (m.pick === 'a') ? b : a;
+
+        if (loser)  roundReached.set(loser, Math.max(roundReached.get(loser)||1, rIdx + 1));
+        if (winner) roundReached.set(winner, Math.max(roundReached.get(winner)||1, rIdx + 2));
+      }
+    });
+  });
+
+  // Final round may be single-slot (no pick): infer champion
+  const last = (cols[totalRounds - 1] || [])[0];
+  if (last) {
+    const {a,b} = namesFrom(last);
+    if (!last.pick) {
+      const aHas = !!a, bHas = !!b;
+      if (aHas && !bHas) roundReached.set(a, Math.max(roundReached.get(a)||1, totalRounds));
+      if (bHas && !aHas) roundReached.set(b, Math.max(roundReached.get(b)||1, totalRounds));
+    } else {
+      // already handled above, but ensure champ reaches final round
+      const champ = (last.pick === 'a') ? a : b;
+      if (champ) roundReached.set(champ, Math.max(roundReached.get(champ)||1, totalRounds));
+    }
+  }
+
+  // Convert to scores: 2^(roundReached-1)
+  const scores = {};
+  for (const [name, round] of roundReached.entries()) {
+    scores[name] = Math.pow(2, Math.max(1, round) - 1);
+  }
+  return scores;
+  // === END round-based scoring ===
 }
 
 
@@ -252,8 +492,12 @@ const ui = renderBracket(bracketEl, rounds);
 submitBtn.onclick = async () => {
 const ranking = ui.getRanking();
 if (!ranking[0]) { playMsg.textContent='Pick winners first!'; return; }
-const scores = scoreFromRanking(ranking);
-const payload = { action:'submit_picks', code, bracket: ui.serialize(), ranking, scores };
+
+// use the rendered matches grid for scoring
+const bracketCols = ui.serialize();
+const scores = scoreFromRanking(ranking, bracketCols);
+
+const payload = { action:'submit_picks', code, bracket: bracketCols, ranking, scores };
 const out = await apiPost(payload);
 if (out.ok) {
 playMsg.textContent='Submitted!';
