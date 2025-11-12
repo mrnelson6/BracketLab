@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BracketRanker</title>
+<style>
+:root{--bg:#0b1020;--card:#121a33;--ink:#e7ecff;--muted:#95a0c6;--accent:#7dd3fc;--right:#34d399;--focus:#fbbf24}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#0b1020,#0a0f24 60%);color:var(--ink);font:16px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:18px;display:grid;gap:18px}
+.card{background:var(--card);border:1px solid #1d274a;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:16px}
+input,textarea{width:100%;padding:12px 14px;border-radius:10px;border:1px solid #2a3a6a;background:#0a1430;color:var(--ink)}
+button{padding:12px 14px;border-radius:10px;border:1px solid #2a3a6a;background:#0e1a3d;color:var(--ink);cursor:pointer}
+button:hover{filter:brightness(1.08)}
+.row{display:flex;gap:10px;align-items:center}
+.grid{display:grid;gap:10px}
+.two{grid-template-columns:1fr 1fr}
+.pill{height:8px;background:#0a1430;border:1px solid #23325e;border-radius:999px;overflow:hidden}
+.bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),#60a5fa);transition:width .3s}
+.bracket{display:grid;grid-auto-flow:column;gap:12px;overflow:auto}
+.round{display:grid;gap:8px;min-width:220px}
+.match{background:#0b1533;border:1px solid #1d274a;border-radius:12px;padding:10px}
+.seed{font:12px/1 ui-monospace,Menlo,Consolas,monospace;color:var(--muted)}
+.entry{margin:6px 0;padding:8px;border-radius:8px;border:1px solid #2a3a6a;cursor:pointer}
+.entry.active{outline:2px solid var(--focus)}
+.entry.win{background:#0e1f3d}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+<h1>🏆 BracketRanker</h1>
+<div class="row">
+<input id="codeInput" placeholder="Enter code (or leave empty to create)" />
+<button id="loadBtn">Load</button>
+<button id="browseBtn">Browse</button>
+</div>
+</div>
+
+
+<div id="createCard" class="card" style="display:none">
+<h2>Create a bracket</h2>
+<label>Question</label>
+<input id="question" placeholder="Which animal would win in a race?" />
+<label>Entries (one per line)</label>
+<textarea id="entries" rows="6" placeholder="Gorilla\nGiraffe\nElephant\nPenguin"></textarea>
+<div class="row">
+<button id="createBtn">Create</button>
+<div id="createMsg" style="margin-left:8px;color:var(--muted)"></div>
+</div>
+</div>
+
+
+<div id="playCard" class="card" style="display:none">
+<h2 id="qText"></h2>
+<div class="bracket" id="bracket"></div>
+<div class="row" style="margin-top:10px">
+<button id="submitBtn">Submit</button>
+<div id="playMsg" style="margin-left:8px;color:var(--muted)"></div>
+</div>
+</div>
+
+
+<div id="statsCard" class="card" style="display:none">
+<h2>📊 Aggregate stats</h2>
+<div id="stats"></div>
+</div>
+
+
+<div id="browseCard" class="card" style="display:none">
+<h2>🔎 Browse recent</h2>
+<ul id="recent" style="list-style:none;padding:0;margin:0"></ul>
+</div>
+</div>
+
+
+<script>
+const APP_URL = 'https://script.google.com/macros/s/AKfycbwbrozFCFyWAgkKqxhKUyBc42HsNSh_0JdDPB0NvH5wlcnZY35KEMPdyeHWNgnrOhi8/exec';
+
+
+// === helpers: no custom headers → no preflight, plain body ===
+async function apiGet(params){
+const url = APP_URL + '?' + new URLSearchParams(params).toString();
+const r = await fetch(url);
+return r.json();
+}
+async function apiPost(payload){
+const r = await fetch(APP_URL, { method:'POST', body: JSON.stringify(payload) });
+try { return await r.json(); } catch { return {ok:true}; }
+}
+
+
+// deterministic shuffle by seed
+function mulberry32(a){return function(){var t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return ((t^t>>>14)>>>0)/4294967296}}
+function strHash(s){let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return h>>>0;}
+function seededShuffle(arr, seed){const r=mulberry32(seed); const a=arr.slice(); for(let i=a.length-1;i>0;i--){const j=Math.floor(r()* (i+1)); [a[i],a[j]]=[a[j],a[i]];} return a;}
+
+
+// bracket build (single-elim, pad with byes)
+function buildBracket(entries, seedStr){
+const seed = strHash(seedStr);
+const shuffled = seededShuffle(entries, seed);
+// power-of-two pad
+let n=1; while(n<shuffled.length) n<<=1;
+const byes = Array(n - shuffled.length).fill(null);
+const round0 = shuffled.concat(byes).map(x => ({entry:x, win:null}));
+const rounds = [round0];
+while(rounds[rounds.length-1].length>1){
+const prev = rounds[rounds.length-1];
+const next = [];
+for(let i=0;i<prev.length;i+=2){ next.push({left:prev[i], right:prev[i+1], win:null}); }
+rounds.push(next);
+}
+return rounds; // rounds[0] leaves, rounds[last] root array of size 1
+}
+
+
+function renderBracket(rootEl, rounds){
+rootEl.innerHTML='';
+// compute leaf matches from leaves up
+const cols=[];
+// Convert leaf nodes into pair matches
+const leaves = rounds[0];
+const r1=[]; for(let i=0;i<leaves.length;i+=2){ r1.push({a:leaves[i], b:leaves[i+1], pick:null}); }
+cols.push(r1);
+// subsequent rounds
+for(let k=1;k<rounds.length;k++){
+const prev = cols[k-1];
+const cur = [];
+for(let i=0;i<prev.length;i+=2){ cur.push({a:prev[i], b:prev[i+1], pick:null}); }
+cols.push(cur);
+}
+
+
+function label(node){ return node?.entry ?? '— bye —'; }
+function isBye(node){ return node?.entry==null; }
+
+
+function update(){
+rootEl.innerHTML='';
+cols.forEach((matches, colIdx)=>{
+const col = document.createElement('div'); col.className='round';
+matches.forEach((m, i)=>{
+const card = document.createElement('div'); card.className='match';
+const e1 = document.createElement('div'); e1.className='entry'; e1.textContent = label(m.a);
+const e2 = document.createElement('div'); e2.className='entry'; e2.textContent = label(m.b);
+
+
+if (isBye(m.a)) { m.pick = 'b'; }
+if (isBye(m.b)) { m.pick = 'a'; }
+
+
+if (m.pick==='a') e1.classList.add('win');
+if (m.pick==='b') e2.classList.add('win');
+
+
+e1.onclick=()=>{ m.pick='a';
+// push winner down to next column
+if (cols[colIdx+1]) cols[colIdx+1][Math.floor(i/2)].a = {entry: label(m.a), pick:null};
+update(); };
+e2.onclick=()=>{ m.pick='b';
+if (cols[colIdx+1]) cols[colIdx+1][Math.floor(i/2)].a = {entry: label(m.b), pick:null};
+update(); };
+
+
+card.innerHTML = `<div class="seed">Round ${colIdx+1}</div>`;
+card.appendChild(e1); card.appendChild(e2);
+col.appendChild(card);
+});
+rootEl.appendChild(col);
+});
+}
+update();
+
+
+return {
+getWinner(){ const last = cols[cols.length-1][0]; return last?.pick==='a' ? label(last.a) : (last?.pick==='b' ? label(last.b) : null);},
+getRanking(){
+// derive ranking via elimination round (winner → last)
+const entries = new Set(); cols[0].forEach(m=>{ if(m.a.entry) entries.add(m.a.entry); if(m.b.entry) entries.add(m.b.entry); });
+const rank = [];
+const losersByRound = [];
+// Walk from first to penultimate rounds to collect losers
+cols.forEach((matches)=>{
+const losers=[]; matches.forEach(m=>{
+if(m.pick==='a' && m.b.entry) losers.push(m.b.entry);
+else if(m.pick==='b' && m.a.entry) losers.push(m.a.entry);
+});
+losersByRound.push(losers);
+});
+const winner = this.getWinner();
+if (winner) rank.push(winner);
+// finalist (last round loser)
+const lastRound = losersByRound[losersByRound.length-1]||[];
+if(lastRound[0]) rank.push(lastRound[0]);
+// others by earlier rounds (those who lost later rank higher)
+for(let i=losersByRound.length-2; i>=0; i--){ rank.push(...losersByRound[i]); }
+// Ensure we included byes? byes never in entries set; ranking remains for real entries only
+// Add any missing entries at end just in case
+entries.forEach(e=>{ if(!rank.includes(e)) rank.push(e); });
+return rank;
+},
+serialize(){ return cols; }
+};
+}
+
+
+function scoreFromRanking(ranking){
+// winner gets N, runner-up N-1, others descend by elimination round; tie-breakers implicit by round depth
+const N = ranking.length; const map={};
+ranking.forEach((name, i)=>{ map[name] = N - i; });
+return map;
+}
+
+
+// UI wiring
+const codeInput = document.getElementById('codeInput');
+const loadBtn = document.getElementById('loadBtn');
+const browseBtn = document.getElementById('browseBtn');
+const createCard = document.getElementById('createCard');
+const playCard = document.getElementById('playCard');
+const statsCard = document.getElementById('statsCard');
+const qText = document.getElementById('qText');
+const bracketEl = document.getElementById('bracket');
+const submitBtn = document.getElementById('submitBtn');
+const playMsg = document.getElementById('playMsg');
+const createBtn = document.getElementById('createBtn');
+const createMsg = document.getElementById('createMsg');
+const entriesEl = document.getElementById('entries');
+const questionEl = document.getElementById('question');
+const browseCard = document.getElementById('browseCard');
+const recentEl = document.getElementById('recent');
+
+
+function show(id, vis){ document.getElementById(id).style.display = vis ? 'block' : 'none'; }
+
+
+async function loadCode(code){
+const res = await apiGet({action:'fetch_set', code});
+if (!res.ok) { playMsg.textContent='Code not found.'; return; }
+show('createCard', false);
+show('playCard', true);
+show('statsCard', true);
+qText.textContent = res.question || 'Untitled bracket';
+
+
+const rounds = buildBracket(res.entries, code);
+const ui = renderBracket(bracketEl, rounds);
+
+
+submitBtn.onclick = async () => {
+const ranking = ui.getRanking();
+if (!ranking[0]) { playMsg.textContent='Pick winners first!'; return; }
+const scores = scoreFromRanking(ranking);
+const payload = { action:'submit_picks', code, bracket: ui.serialize(), ranking, scores };
+const out = await apiPost(payload);
+if (out.ok) {
+playMsg.textContent='Submitted!';
+const agg = await apiGet({action:'stats', code});
+renderStats(agg);
+} else {
+playMsg.textContent='Submit failed.';
+}
+};
+
+
+const agg = await apiGet({action:'stats', code});
+renderStats(agg);
+}
+
+
+function renderStats(agg){
+const box = document.getElementById('stats');
+if (!agg.ok){ box.textContent='No stats yet.'; return; }
+const rows = agg.aggregate||[];
+box.innerHTML = rows.map((r,i)=>`<div>${i+1}. <b>${r.entry}</b> — total score ${r.totalScore} ${r.avgRank?`(avg rank ${r.avgRank.toFixed(2)})`:''} · n=${r.samples}</div>`).join('');
+}
+
+
+loadBtn.onclick = async ()=>{
+const code = (codeInput.value||'').trim().toUpperCase();
+if (!code){ show('createCard', true); show('playCard', false); show('statsCard', false); return; }
+await loadCode(code);
+};
+
+
+createBtn.onclick = async ()=>{
+const question = (questionEl.value||'').trim();
+const entries = (entriesEl.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+const out = await apiPost({action:'create_set', question, entries});
+if (out.ok){
+createMsg.innerHTML = `Code: <b>${out.code}</b> — share this!`;
+codeInput.value = out.code;
+await loadCode(out.code);
+} else {
+createMsg.textContent = out.error || 'Failed to create.';
+}
+};
+
+
+browseBtn.onclick = async ()=>{
+const res = await apiGet({action:'browse'});
+if (!res.ok){ return; }
+browseCard.style.display='block';
+recentEl.innerHTML = res.rows.map(r=>`<li style="margin:6px 0"><a href="#" data-code="${r.code}"><b>${r.question||r.code}</b></a> <span style="color:var(--muted)">(${r.entries.length} entries)</span></li>`).join('');
+recentEl.querySelectorAll('a').forEach(a=>a.onclick=(e)=>{e.preventDefault(); codeInput.value=a.dataset.code; loadBtn.click();});
+};
+
+
+// Deep link ?code=FOO
+const urlParams = new URLSearchParams(location.search);
+if (urlParams.get('code')){ codeInput.value = urlParams.get('code').toUpperCase(); loadBtn.click(); }
+</script>
+</body>
+</html>
