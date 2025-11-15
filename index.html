@@ -87,7 +87,7 @@ button:hover{filter:brightness(1.08)}
 <body>
 <div class="wrap">
 <div class="card">
-<h1>🏆 BracketRanker</h1>
+<h1>🏆 BracketLab</h1>
 <div class="row">
 <input id="codeInput" placeholder="Enter code (or leave empty to create)" />
 <button id="loadBtn">Load</button>
@@ -136,6 +136,35 @@ button:hover{filter:brightness(1.08)}
 const APP_URL = 'https://script.google.com/macros/s/AKfycbwbrozFCFyWAgkKqxhKUyBc42HsNSh_0JdDPB0NvH5wlcnZY35KEMPdyeHWNgnrOhi8/exec';
 
 
+// === BEGIN localStorage helpers for picks ===
+function rememberPicks(code, ranking){
+  try {
+    localStorage.setItem(`br_submitted_${code}`, '1');
+    localStorage.setItem(`br_ranking_${code}`, JSON.stringify(ranking));
+  } catch (e) {
+    // localStorage might be unavailable in some environments; fail silently
+  }
+}
+
+function hasSubmitted(code){
+  try {
+    return localStorage.getItem(`br_submitted_${code}`) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+function getSavedRanking(code){
+  try {
+    const raw = localStorage.getItem(`br_ranking_${code}`);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+// === END localStorage helpers for picks ===
+
 // === helpers: no custom headers → no preflight, plain body ===
 async function apiGet(params){
 const url = APP_URL + '?' + new URLSearchParams(params).toString();
@@ -156,23 +185,24 @@ function seededShuffle(arr, seed){const r=mulberry32(seed); const a=arr.slice();
 
 // bracket build (single-elim, pad with byes)
 function buildBracket(entries, seedStr){
-const seed = strHash(seedStr);
-const shuffled = seededShuffle(entries, seed);
-// power-of-two pad
-let n=1; while(n<shuffled.length) n<<=1;
+  //const seed = strHash(seedStr);
+  const seed = Math.floor(Math.random() * 0xffffffff); 
+  const shuffled = seededShuffle(entries, seed);
+  // power-of-two pad
+  let n=1; while(n<shuffled.length) n<<=1;
 
-// === BEGIN random bye distribution (no bye-vs-bye in Round 1) ===
-const byeCount = n - shuffled.length;
+  // === BEGIN random bye distribution (no bye-vs-bye in Round 1) ===
+  const byeCount = n - shuffled.length;
 
-// Edge case: if no byes, just fill straight across
-if (byeCount === 0) {
-  const round0 = Array.from({length:n}, (_,i) => ({
-    entry: shuffled[i] ?? null,
-    win: null
-  }));
-  // (existing, do not delete)
-  const rounds = [round0];
-  return rounds; // short-circuit
+  // Edge case: if no byes, just fill straight across
+  if (byeCount === 0) {
+    const round0 = Array.from({length:n}, (_,i) => ({
+      entry: shuffled[i] ?? null,
+      win: null
+    }));
+    // (existing, do not delete)
+    const rounds = [round0];
+    return rounds; // short-circuit
 }
 
 // We’ll choose distinct first-round *pairs* to host byes,
@@ -221,19 +251,19 @@ return rounds; // rounds[0] leaves, rounds[last] root array of size 1
 
 
 function renderBracket(rootEl, rounds){
-rootEl.innerHTML='';
-// compute leaf matches from leaves up
-const cols=[];
-// Convert leaf nodes into pair matches
-const leaves = rounds[0];
-const r1=[]; for(let i=0;i<leaves.length;i+=2){ r1.push({a:leaves[i], b:leaves[i+1], pick:null}); }
-cols.push(r1);
-// subsequent rounds
-for(let k=1;k<rounds.length;k++){
-const prev = cols[k-1];
-const cur = [];
-for(let i=0;i<prev.length;i+=2){ cur.push({a:prev[i], b:prev[i+1], pick:null}); }
-cols.push(cur);
+  rootEl.innerHTML='';
+  // compute leaf matches from leaves up
+  const cols=[];
+  // Convert leaf nodes into pair matches
+  const leaves = rounds[0];
+  const r1=[]; for(let i=0;i<leaves.length;i+=2){ r1.push({a:leaves[i], b:leaves[i+1], pick:null}); }
+  cols.push(r1);
+  // subsequent rounds
+  for(let k=1;k<rounds.length;k++){
+  const prev = cols[k-1];
+  const cur = [];
+  for(let i=0;i<prev.length;i+=2){ cur.push({a:prev[i], b:prev[i+1], pick:null}); }
+  cols.push(cur);
 }
 
 
@@ -489,24 +519,58 @@ const rounds = buildBracket(res.entries, code);
 const ui = renderBracket(bracketEl, rounds);
 
 
-submitBtn.onclick = async () => {
-const ranking = ui.getRanking();
-if (!ranking[0]) { playMsg.textContent='Pick winners first!'; return; }
-
-// use the rendered matches grid for scoring
-const bracketCols = ui.serialize();
-const scores = scoreFromRanking(ranking, bracketCols);
-
-const payload = { action:'submit_picks', code, bracket: bracketCols, ranking, scores };
-const out = await apiPost(payload);
-if (out.ok) {
-playMsg.textContent='Submitted!';
-const agg = await apiGet({action:'stats', code});
-renderStats(agg);
-} else {
-playMsg.textContent='Submit failed.';
+const saved = getSavedRanking(code);
+if (hasSubmitted(code) && saved && saved.length) {
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Already submitted';
+  playMsg.textContent = `You already submitted: ${saved.join(' → ')}`;
+  // optional: you could auto-show stats for returning users:
+  // show('statsCard', true);
+  // const agg = await apiGet({action:'stats', code});
+  // renderStats(agg);
 }
+
+// (existing, do not delete)
+submitBtn.onclick = async () => {
+  // Block repeat submits in this browser
+  if (hasSubmitted(code)) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Already submitted';
+    const saved = getSavedRanking(code);
+    if (saved && saved.length) {
+      playMsg.textContent = `You already submitted: ${saved.join(' → ')}`;
+    } else {
+      playMsg.textContent = 'You already submitted a bracket on this device.';
+    }
+    return;
+  }
+
+  const ranking = ui.getRanking();
+  if (!ranking[0]) { playMsg.textContent='Pick winners first!'; return; }
+
+  // Disable button to prevent double click
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Submitting…';
+
+  const bracketCols = ui.serialize();
+  const scores = scoreFromRanking(ranking, bracketCols);
+  const payload = { action:'submit_picks', code, bracket: bracketCols, ranking, scores };
+
+  const out = await apiPost(payload);
+  if (out.ok) {
+    rememberPicks(code, ranking); // store locally
+    playMsg.textContent='Submitted!';
+    submitBtn.textContent = 'Submitted';
+    show('statsCard', true);
+    const agg = await apiGet({action:'stats', code});
+    renderStats(agg);
+  } else {
+    playMsg.textContent='Submit failed.';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Submit';
+  }
 };
+
 
 
 const agg = await apiGet({action:'stats', code});
@@ -530,16 +594,32 @@ await loadCode(code);
 
 
 createBtn.onclick = async ()=>{
-const question = (questionEl.value||'').trim();
-const entries = (entriesEl.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
-const out = await apiPost({action:'create_set', question, entries});
-if (out.ok){
-createMsg.innerHTML = `Code: <b>${out.code}</b> — share this!`;
-codeInput.value = out.code;
-await loadCode(out.code);
-} else {
-createMsg.textContent = out.error || 'Failed to create.';
-}
+  if (createBtn.disabled) return; // guard
+  const question = (questionEl.value||'').trim();
+  const entries = (entriesEl.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  if (entries.length < 2) {
+    createMsg.textContent = 'Need at least two entries.';
+    return;
+  }
+
+  createBtn.disabled = true;
+  const originalText = createBtn.textContent;
+  createBtn.textContent = 'Creating…';
+
+  const out = await apiPost({action:'create_set', question, entries});
+  if (out.ok){
+    createMsg.innerHTML = `Code: <b>${out.code}</b> — share this!`;
+    codeInput.value = out.code;
+    // (optional) remember created bracket locally
+    try {
+      localStorage.setItem(`br_created_${out.code}`, JSON.stringify({question, entries}));
+    } catch(e){}
+    await loadCode(out.code);
+  } else {
+    createMsg.textContent = out.error || 'Failed to create.';
+    createBtn.disabled = false;
+    createBtn.textContent = originalText;
+  }
 };
 
 
