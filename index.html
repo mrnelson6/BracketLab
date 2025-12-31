@@ -82,6 +82,31 @@ button:hover{filter:brightness(1.08)}
 }
 .round:last-child .match { box-shadow: 0 0 0 2px rgba(125,211,252,.25) inset; }
 .round:last-child .entry.win { box-shadow: 0 0 10px rgba(125,211,252,.45); }
+
+/* Read-only mode styling */
+.bracket.readonly .entry {
+  cursor: default;
+}
+.bracket.readonly .entry:hover {
+  background-color: inherit;
+}
+.review-banner {
+  background: linear-gradient(90deg, #1e3a5f, #2d4a6f);
+  border: 1px solid #3b82f6;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent);
+}
+.review-banner .icon {
+  font-size: 20px;
+}
+.review-banner .text {
+  flex: 1;
+}
 </style>
 </head>
 <body>
@@ -111,6 +136,10 @@ button:hover{filter:brightness(1.08)}
 
 <div id="playCard" class="card" style="display:none">
 <h2 id="qText"></h2>
+<div id="reviewBanner" class="review-banner" style="display:none">
+<span class="icon">👁️</span>
+<span class="text">You're viewing your submitted bracket. Picks cannot be changed.</span>
+</div>
 <div class="bracket" id="bracket"></div>
 <div class="row" style="margin-top:10px">
 <button id="submitBtn">Submit</button>
@@ -135,12 +164,32 @@ button:hover{filter:brightness(1.08)}
 <script>
 const APP_URL = 'https://script.google.com/macros/s/AKfycbwbrozFCFyWAgkKqxhKUyBc42HsNSh_0JdDPB0NvH5wlcnZY35KEMPdyeHWNgnrOhi8/exec';
 
+// === BEGIN player ID persistence ===
+function getPlayerId() {
+  try {
+    let id = localStorage.getItem('br_player_id');
+    if (!id) {
+      id = 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+      localStorage.setItem('br_player_id', id);
+    }
+    return id;
+  } catch (e) {
+    // If localStorage unavailable, generate a session-only ID
+    return 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+  }
+}
+const PLAYER_ID = getPlayerId();
+// === END player ID persistence ===
+
 
 // === BEGIN localStorage helpers for picks ===
-function rememberPicks(code, ranking){
+function rememberPicks(code, ranking, bracket){
   try {
     localStorage.setItem(`br_submitted_${code}`, '1');
     localStorage.setItem(`br_ranking_${code}`, JSON.stringify(ranking));
+    if (bracket) {
+      localStorage.setItem(`br_bracket_${code}`, JSON.stringify(bracket));
+    }
   } catch (e) {
     // localStorage might be unavailable in some environments; fail silently
   }
@@ -157,6 +206,16 @@ function hasSubmitted(code){
 function getSavedRanking(code){
   try {
     const raw = localStorage.getItem(`br_ranking_${code}`);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function getSavedBracket(code){
+  try {
+    const raw = localStorage.getItem(`br_bracket_${code}`);
     if (!raw) return null;
     return JSON.parse(raw);
   } catch (e) {
@@ -200,9 +259,17 @@ function buildBracket(entries, seedStr){
       entry: shuffled[i] ?? null,
       win: null
     }));
-    // (existing, do not delete)
+    // Build subsequent rounds (same logic as below)
     const rounds = [round0];
-    return rounds; // short-circuit
+    while(rounds[rounds.length-1].length > 1){
+      const prev = rounds[rounds.length-1];
+      const next = [];
+      for(let i=0; i<prev.length; i+=2){
+        next.push({left: prev[i], right: prev[i+1], win: null});
+      }
+      rounds.push(next);
+    }
+    return rounds;
 }
 
 // We’ll choose distinct first-round *pairs* to host byes,
@@ -250,178 +317,199 @@ return rounds; // rounds[0] leaves, rounds[last] root array of size 1
 }
 
 
-function renderBracket(rootEl, rounds){
+function renderBracket(rootEl, data, fromSaved, readOnly = false){
   rootEl.innerHTML='';
-  // compute leaf matches from leaves up
-  const cols=[];
-  // Convert leaf nodes into pair matches
-  const leaves = rounds[0];
-  const r1=[]; for(let i=0;i<leaves.length;i+=2){ r1.push({a:leaves[i], b:leaves[i+1], pick:null}); }
-  cols.push(r1);
-  // subsequent rounds
-  for(let k=1;k<rounds.length;k++){
-  const prev = cols[k-1];
-  const cur = [];
-  for(let i=0;i<prev.length;i+=2){ cur.push({a:prev[i], b:prev[i+1], pick:null}); }
-  cols.push(cur);
-}
+
+  // === BEGIN support for saved bracket cols ===
+  let cols;
+
+  if (fromSaved) {
+    // data is already the cols structure we serialized before
+    cols = JSON.parse(JSON.stringify(data));
+  } else {
+    const rounds = data;
+    cols = [];
+
+    // Convert leaf nodes into pair matches
+    const leaves = rounds[0];
+    const r1 = [];
+    for (let i = 0; i < leaves.length; i += 2) {
+      r1.push({ a: leaves[i], b: leaves[i+1], pick: null });
+    }
+    cols.push(r1);
+
+    // subsequent rounds
+    for (let k = 1; k < rounds.length; k++) {
+      const prev = cols[k-1];
+      const cur = [];
+      for (let i = 0; i < prev.length; i += 2) {
+        cur.push({ a: prev[i], b: prev[i+1], pick: null });
+      }
+      cols.push(cur);
+    }
+  }
 
 
-function isEmpty(node){ return node === 'undefined'; }          // not decided/placed yet
-function isBye(node){ return node && node.entry === null; }   // explicit bye
-function hasEntry(node){ return node && node.entry != null; } // real name present
+  function isEmpty(node){ return node === 'undefined'; }          // not decided/placed yet
+  function isBye(node){ return node && node.entry === null; }   // explicit bye
+  function hasEntry(node){ return node && node.entry != null; } // real name present
 
-function label(node){
-  // undefined → blank (pending); null → "— bye —"; otherwise the entry string
-  if (isEmpty(node)) return '';
-  if (isBye(node)) return '— bye —';
-  if (!node || node.entry === undefined || node.entry === null) return '';
-  return String(node.entry ?? '');
-}
+  function label(node){
+    // undefined → blank (pending); null → "— bye —"; otherwise the entry string
+    if (isEmpty(node)) return '';
+    if (isBye(node)) return '— bye —';
+    if (!node || node.entry === undefined || node.entry === null) return '';
+    return String(node.entry ?? '');
+  }
 
-function placeWinner(roundIdx, matchIdx, winnerLabel){
-  const nextCol = cols[roundIdx + 1];
-  if (!nextCol) return;                          // no next round
-  const nextMatch = nextCol[Math.floor(matchIdx / 2)];
-  const side = (matchIdx % 2 === 0) ? 'a' : 'b'; // even → a, odd → b
-  nextMatch[side] = { entry: winnerLabel, pick: null };
-}
+  function placeWinner(roundIdx, matchIdx, winnerLabel){
+    const nextCol = cols[roundIdx + 1];
+    if (!nextCol) return;                          // no next round
+    const nextMatch = nextCol[Math.floor(matchIdx / 2)];
+    const side = (matchIdx % 2 === 0) ? 'a' : 'b'; // even → a, odd → b
+    nextMatch[side] = { entry: winnerLabel, pick: null };
+  }
 
-function pickAndAdvance(roundIdx, matchIdx, pickSide, m){
-  m.pick = pickSide;
-  const winnerLabel = label(pickSide === 'a' ? m.a : m.b);
-  placeWinner(roundIdx, matchIdx, winnerLabel);
+  function pickAndAdvance(roundIdx, matchIdx, pickSide, m){
+    m.pick = pickSide;
+    const winnerLabel = label(pickSide === 'a' ? m.a : m.b);
+    placeWinner(roundIdx, matchIdx, winnerLabel);
+    update();
+  }
+
+  function update(){
+  rootEl.innerHTML='';
+  cols.forEach((matches, colIdx)=>{
+  const col = document.createElement('div'); col.className='round';
+  matches.forEach((m, i)=>{
+  const card = document.createElement('div'); card.className='match';
+  const e1 = document.createElement('div'); e1.className='entry'; e1.textContent = label(m.a);
+  const e2 = document.createElement('div'); e2.className='entry'; e2.textContent = label(m.b);
+
+
+  if (isBye(m.a) && hasEntry(m.b)) m.pick = 'b';
+  if (isBye(m.b) && hasEntry(m.a)) m.pick = 'a';
+
+  // If a pick exists (either by user click or valid bye auto-pick), advance winner
+  if (m.pick === 'a' || m.pick === 'b') {
+    placeWinner(colIdx, i, label(m[m.pick]));
+  }
+
+  // apply selected styles
+  if (m.pick === 'a') e1.classList.add('win');
+  if (m.pick === 'b') e2.classList.add('win');
+
+  // click → set pick and advance (even index → nextMatch.a, odd index → nextMatch.b)
+  if (!readOnly) {
+    e1.onclick = () => pickAndAdvance(colIdx, i, 'a', m);
+    e2.onclick = () => pickAndAdvance(colIdx, i, 'b', m);
+  } else {
+    e1.style.cursor = 'default';
+    e2.style.cursor = 'default';
+  }
+
+
+  const isFinal = (colIdx === cols.length - 1);
+  const heading = isFinal ? 'Champion' : `Round ${colIdx+1}`;
+  card.innerHTML = `<div class="seed">${heading}</div>`;
+
+  // === BEGIN champion render logic (single slot only if other side is bye/pending) ===
+  const aHas = hasEntry(m.a);      // real name
+  const bHas = hasEntry(m.b);
+  const aBye = isBye(m.a);
+  const bBye = isBye(m.b);
+
+  // final should be single-slot only if exactly one side is a real entry,
+  // and the other side is either a bye or still pending (undefined)
+  const singleFinal = isFinal && (
+    (aHas && !bHas) || (bHas && !aHas) || (aHas && bBye) || (bHas && aBye)
+  );
+
+  if (singleFinal) {
+    const winnerName =
+      (m.pick === 'a' && aHas) ? label(m.a) :
+      (m.pick === 'b' && bHas) ? label(m.b) :
+      aHas ? label(m.a) : bHas ? label(m.b) : '';
+
+    const single = document.createElement('div');
+    single.className = 'entry win';
+    single.textContent = winnerName || '';
+    card.appendChild(single);
+  } else {
+    // normal: show both sides so user can click a final
+    card.appendChild(e1);
+    card.appendChild(e2);
+  }
+  col.appendChild(card);
+  });
+  rootEl.appendChild(col);
+  });
+  }
   update();
-}
-
-function update(){
-rootEl.innerHTML='';
-cols.forEach((matches, colIdx)=>{
-const col = document.createElement('div'); col.className='round';
-matches.forEach((m, i)=>{
-const card = document.createElement('div'); card.className='match';
-const e1 = document.createElement('div'); e1.className='entry'; e1.textContent = label(m.a);
-const e2 = document.createElement('div'); e2.className='entry'; e2.textContent = label(m.b);
 
 
-if (isBye(m.a) && hasEntry(m.b)) m.pick = 'b';
-if (isBye(m.b) && hasEntry(m.a)) m.pick = 'a';
+  return {
+  getWinner(){
+    const last = cols[cols.length - 1][0];
+    if (!last) return null;
 
-// If a pick exists (either by user click or valid bye auto-pick), advance winner
-if (m.pick === 'a' || m.pick === 'b') {
-  placeWinner(colIdx, i, label(m[m.pick]));
-}
+    if (last.pick === 'a') return label(last.a) || null;
+    if (last.pick === 'b') return label(last.b) || null;
 
-// apply selected styles
-if (m.pick === 'a') e1.classList.add('win');
-if (m.pick === 'b') e2.classList.add('win');
+    const aHas = hasEntry(last.a);
+    const bHas = hasEntry(last.b);
+    const aBye = isBye(last.a);
+    const bBye = isBye(last.b);
 
-// click → set pick and advance (even index → nextMatch.a, odd index → nextMatch.b)
-e1.onclick = () => pickAndAdvance(colIdx, i, 'a', m);
-e2.onclick = () => pickAndAdvance(colIdx, i, 'b', m);
+    // If exactly one real entry exists (other side pending or bye), that entry is champ
+    if (aHas && (!bHas || bBye)) return label(last.a) || null;
+    if (bHas && (!aHas || aBye)) return label(last.b) || null;
 
+    return null; // both sides pending or both real but no pick yet
+  },
+  getRanking(){
+  // Round-1 entries (ground truth universe)
+  const round1Entries = cols[0].flatMap(m => {
+      const a = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
+      const b = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
+      return [a, b].filter(x => x !== null);
+  });
 
-const isFinal = (colIdx === cols.length - 1);
-const heading = isFinal ? 'Champion' : `Round ${colIdx+1}`;
-card.innerHTML = `<div class="seed">${heading}</div>`;
+  // Collect losers per round (ignore pending and byes)
+  const losersByRound = cols.map(matches => {
+      const losers = [];
+      matches.forEach(m => {
+      const aName = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
+      const bName = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
 
-// === BEGIN champion render logic (single slot only if other side is bye/pending) ===
-const aHas = hasEntry(m.a);      // real name
-const bHas = hasEntry(m.b);
-const aBye = isBye(m.a);
-const bBye = isBye(m.b);
+      if (m.pick === 'a' && bName !== null) losers.push(bName);
+      else if (m.pick === 'b' && aName !== null) losers.push(aName);
+      });
+      return losers;
+  });
 
-// final should be single-slot only if exactly one side is a real entry,
-// and the other side is either a bye or still pending (undefined)
-const singleFinal = isFinal && (
-  (aHas && !bHas) || (bHas && !aHas) || (aHas && bBye) || (bHas && aBye)
-);
+  const out = [];
+  const champ = this.getWinner();
+  if (champ) out.push(champ);
 
-if (singleFinal) {
-  const winnerName =
-    (m.pick === 'a' && aHas) ? label(m.a) :
-    (m.pick === 'b' && bHas) ? label(m.b) :
-    aHas ? label(m.a) : bHas ? label(m.b) : '';
+  // Finalist (loser of the last round), if any
+  const finalLosers = losersByRound[losersByRound.length - 1] || [];
+  if (finalLosers[0]) out.push(finalLosers[0]);
 
-  const single = document.createElement('div');
-  single.className = 'entry win';
-  single.textContent = winnerName || '';
-  card.appendChild(single);
-} else {
-  // normal: show both sides so user can click a final
-  card.appendChild(e1);
-  card.appendChild(e2);
-}
-col.appendChild(card);
-});
-rootEl.appendChild(col);
-});
-}
-update();
+  // Earlier rounds losers: later-round losers rank higher
+  for (let r = losersByRound.length - 2; r >= 0; r--) {
+      losersByRound[r].forEach(name => { if (!out.includes(name)) out.push(name); });
+  }
 
+  // Add any still-missing round-1 entries at the end (e.g., unplayed when user stops early)
+  round1Entries.forEach(name => { if (name && !out.includes(name)) out.push(name); });
 
-return {
-getWinner(){
-  const last = cols[cols.length - 1][0];
-  if (!last) return null;
+  return out;
+  },
+  // === END robust ranking ===
 
-  if (last.pick === 'a') return label(last.a) || null;
-  if (last.pick === 'b') return label(last.b) || null;
-
-  const aHas = hasEntry(last.a);
-  const bHas = hasEntry(last.b);
-  const aBye = isBye(last.a);
-  const bBye = isBye(last.b);
-
-  // If exactly one real entry exists (other side pending or bye), that entry is champ
-  if (aHas && (!bHas || bBye)) return label(last.a) || null;
-  if (bHas && (!aHas || aBye)) return label(last.b) || null;
-
-  return null; // both sides pending or both real but no pick yet
-},
-getRanking(){
-// Round-1 entries (ground truth universe)
-const round1Entries = cols[0].flatMap(m => {
-    const a = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
-    const b = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
-    return [a, b].filter(x => x !== null);
-});
-
-// Collect losers per round (ignore pending and byes)
-const losersByRound = cols.map(matches => {
-    const losers = [];
-    matches.forEach(m => {
-    const aName = (m?.a && m.a.entry != null) ? String(m.a.entry) : null;
-    const bName = (m?.b && m.b.entry != null) ? String(m.b.entry) : null;
-
-    if (m.pick === 'a' && bName !== null) losers.push(bName);
-    else if (m.pick === 'b' && aName !== null) losers.push(aName);
-    });
-    return losers;
-});
-
-const out = [];
-const champ = this.getWinner();
-if (champ) out.push(champ);
-
-// Finalist (loser of the last round), if any
-const finalLosers = losersByRound[losersByRound.length - 1] || [];
-if (finalLosers[0]) out.push(finalLosers[0]);
-
-// Earlier rounds losers: later-round losers rank higher
-for (let r = losersByRound.length - 2; r >= 0; r--) {
-    losersByRound[r].forEach(name => { if (!out.includes(name)) out.push(name); });
-}
-
-// Add any still-missing round-1 entries at the end (e.g., unplayed when user stops early)
-round1Entries.forEach(name => { if (name && !out.includes(name)) out.push(name); });
-
-return out;
-},
-// === END robust ranking ===
-
-serialize(){ return cols; }
-};
+  serialize(){ return cols; }
+  };
 }
 
 
@@ -501,6 +589,7 @@ const entriesEl = document.getElementById('entries');
 const questionEl = document.getElementById('question');
 const browseCard = document.getElementById('browseCard');
 const recentEl = document.getElementById('recent');
+const reviewBanner = document.getElementById('reviewBanner');
 
 
 function show(id, vis){ document.getElementById(id).style.display = vis ? 'block' : 'none'; }
@@ -512,22 +601,71 @@ if (!res.ok) { playMsg.textContent='Code not found.'; return; }
 show('createCard', false);
 show('playCard', true);
 show('statsCard', true);
-qText.textContent = res.question || 'Untitled bracket';
+qText.textContent = res.question || code;
 
+let ui;
+let alreadySubmitted = false;
 
-const rounds = buildBracket(res.entries, code);
-const ui = renderBracket(bracketEl, rounds);
+// First check localStorage for a saved bracket (faster, works offline)
+const savedBracket = getSavedBracket(code);
+const savedRanking = getSavedRanking(code);
 
+if (hasSubmitted(code) && savedBracket) {
+  // User has submitted from this device - show their bracket in read-only mode
+  ui = renderBracket(bracketEl, savedBracket, true, true);
+  bracketEl.classList.add('readonly');
+  reviewBanner.style.display = 'flex';
+  alreadySubmitted = true;
 
-const saved = getSavedRanking(code);
-if (hasSubmitted(code) && saved && saved.length) {
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Already submitted';
-  playMsg.textContent = `You already submitted: ${saved.join(' → ')}`;
-  // optional: you could auto-show stats for returning users:
-  // show('statsCard', true);
-  // const agg = await apiGet({action:'stats', code});
-  // renderStats(agg);
+  submitBtn.textContent = 'View Your Picks';
+  if (savedRanking && savedRanking.length) {
+    playMsg.textContent = `Your picks: ${savedRanking.join(' → ')}`;
+  } else {
+    playMsg.textContent = 'Viewing your submitted bracket.';
+  }
+} else {
+  // Try to fetch from server (in case user submitted from another device)
+  try {
+    const mine = await apiGet({ action:'my_picks', code, player_id: PLAYER_ID });
+    if (mine.ok && mine.found && mine.bracket) {
+      // Rebuild the same matchups and auto-apply picks in read-only mode
+      ui = renderBracket(bracketEl, mine.bracket, true, true);
+      bracketEl.classList.add('readonly');
+      reviewBanner.style.display = 'flex';
+      alreadySubmitted = true;
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'View Your Picks';
+      if (mine.ranking && mine.ranking.length) {
+        playMsg.textContent = `Your picks: ${mine.ranking.join(' → ')}`;
+      } else {
+        playMsg.textContent = 'Viewing your submitted bracket.';
+      }
+
+      // Cache it locally for faster future loads
+      rememberPicks(code, mine.ranking, mine.bracket);
+    } else {
+      // No previous picks: build a fresh random bracket
+      const seedStr = `${code}:${Date.now()}:${Math.random()}`;
+      const rounds = buildBracket(res.entries, seedStr);
+      ui = renderBracket(bracketEl, rounds, false, false);
+    }
+  } catch (e) {
+    // If my_picks fails for any reason, fall back to a fresh bracket
+    const seedStr = `${code}:${Date.now()}:${Math.random()}`;
+    const rounds = buildBracket(res.entries, seedStr);
+    ui = renderBracket(bracketEl, rounds, false, false);
+  }
+}
+
+// Reset submit button state for new brackets
+if (!alreadySubmitted) {
+  submitBtn.disabled = false;
+  submitBtn.textContent = 'Submit';
+  playMsg.textContent = '';
+  bracketEl.classList.remove('readonly');
+  reviewBanner.style.display = 'none';
 }
 
 // (existing, do not delete)
@@ -554,13 +692,13 @@ submitBtn.onclick = async () => {
 
   const bracketCols = ui.serialize();
   const scores = scoreFromRanking(ranking, bracketCols);
-  const payload = { action:'submit_picks', code, bracket: bracketCols, ranking, scores };
+  const payload = { action:'submit_picks', code, player_id: PLAYER_ID, bracket: bracketCols, ranking, scores };
 
   const out = await apiPost(payload);
   if (out.ok) {
-    rememberPicks(code, ranking); // store locally
-    playMsg.textContent='Submitted!';
-    submitBtn.textContent = 'Submitted';
+    rememberPicks(code, ranking, bracketCols); // store locally with bracket
+    playMsg.textContent=`Submitted! Your picks: ${ranking.join(' → ')}`;
+    submitBtn.textContent = 'View Your Picks';
     show('statsCard', true);
     const agg = await apiGet({action:'stats', code});
     renderStats(agg);
