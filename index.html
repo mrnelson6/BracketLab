@@ -143,8 +143,7 @@ button:hover{filter:brightness(1.08)}
 <h1>🏆 BracketLab</h1>
 <div class="row">
 <input id="codeInput" placeholder="Enter code (or leave empty to create)" />
-<button id="loadBtn">Load</button>
-<button id="browseBtn">Browse</button>
+<button id="loadBtn">Create</button>
 </div>
 </div>
 
@@ -184,7 +183,7 @@ button:hover{filter:brightness(1.08)}
 
 
 <div id="browseCard" class="card" style="display:none">
-<h2>🔎 Browse recent</h2>
+<h2>🔎 Recent brackets</h2>
 <ul id="recent" style="list-style:none;padding:0;margin:0"></ul>
 </div>
 </div>
@@ -715,7 +714,6 @@ function scoreFromRanking(_ranking, cols){
 // UI wiring
 const codeInput = document.getElementById('codeInput');
 const loadBtn = document.getElementById('loadBtn');
-const browseBtn = document.getElementById('browseBtn');
 const createCard = document.getElementById('createCard');
 const playCard = document.getElementById('playCard');
 const statsCard = document.getElementById('statsCard');
@@ -875,6 +873,13 @@ const rows = agg.aggregate||[];
 box.innerHTML = rows.map((r,i)=>`<div>${i+1}. <b>${r.entry}</b> — total score ${r.totalScore} ${r.avgRank?`(avg rank ${r.avgRank.toFixed(2)})`:''} · n=${r.samples}</div>`).join('');
 }
 
+
+// Button reads "Create" when the box is empty, "Load" once a code is typed.
+function syncLoadBtnLabel(){
+  loadBtn.textContent = (codeInput.value||'').trim() ? 'Load' : 'Create';
+}
+codeInput.addEventListener('input', syncLoadBtnLabel);
+syncLoadBtnLabel();
 
 loadBtn.onclick = async ()=>{
 const code = (codeInput.value||'').trim().toUpperCase();
@@ -1042,18 +1047,21 @@ createBtn.onclick = async ()=>{
 };
 
 
-browseBtn.onclick = async ()=>{
+async function loadBrowse(){
 const res = await fetchBrowse();
 if (!res.ok){ return; }
 browseCard.style.display='block';
 recentEl.innerHTML = res.rows.map(r=>`<li style="margin:6px 0"><a href="#" data-code="${r.code}"><b>${r.question||r.code}</b></a> <span style="color:var(--muted)">(${r.entries.length} entries)</span></li>`).join('');
-recentEl.querySelectorAll('a').forEach(a=>a.onclick=(e)=>{e.preventDefault(); codeInput.value=a.dataset.code; loadBtn.click();});
-};
+recentEl.querySelectorAll('a').forEach(a=>a.onclick=(e)=>{e.preventDefault(); codeInput.value=a.dataset.code; syncLoadBtnLabel(); loadBtn.click();});
+}
 
+
+// Show recent brackets by default on the home page.
+loadBrowse();
 
 // Deep link ?code=FOO
 const urlParams = new URLSearchParams(location.search);
-if (urlParams.get('code')){ codeInput.value = urlParams.get('code').toUpperCase(); loadBtn.click(); }
+if (urlParams.get('code')){ codeInput.value = urlParams.get('code').toUpperCase(); syncLoadBtnLabel(); loadBtn.click(); }
 </script>
 </body>
 </html>
