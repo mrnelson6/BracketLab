@@ -107,6 +107,34 @@ button:hover{filter:brightness(1.08)}
 .review-banner .text {
   flex: 1;
 }
+
+/* Entry thumbnails inside the bracket */
+.entry { display: flex; align-items: center; gap: 8px; }
+.entry-name { flex: 1; }
+.entry-img {
+  width: 28px; height: 28px; border-radius: 6px;
+  object-fit: cover; flex: 0 0 auto; background: #0a1430;
+}
+
+/* Create-bracket entry rows */
+.entry-row {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid #1d274a; border-radius: 10px; padding: 8px;
+  background: #0b1533;
+}
+.entry-row.dragover { border-color: var(--accent); background: #11214a; }
+.entry-row .name { flex: 1; }
+.entry-row .url { flex: 1.2; }
+.entry-row .thumb {
+  width: 44px; height: 44px; border-radius: 8px; object-fit: cover;
+  flex: 0 0 auto; border: 1px solid #2a3a6a; background: #0a1430;
+}
+.entry-row .filebtn {
+  white-space: nowrap; padding: 8px 10px; font-size: 14px;
+}
+.entry-row .removebtn {
+  flex: 0 0 auto; border-color: #5a2a3a; color: #f4a8bd;
+}
 </style>
 </head>
 <body>
@@ -125,9 +153,10 @@ button:hover{filter:brightness(1.08)}
 <h2>Create a bracket</h2>
 <label>Question</label>
 <input id="question" placeholder="Which animal would win in a race?" />
-<label>Entries (one per line)</label>
-<textarea id="entries" rows="6" placeholder="Gorilla\nGiraffe\nElephant\nPenguin"></textarea>
-<div class="row">
+<label>Entries</label>
+<div id="entryList" class="grid"></div>
+<button id="addEntryBtn" type="button" style="margin-top:8px">+ Add entry</button>
+<div class="row" style="margin-top:12px">
 <button id="createBtn">Create</button>
 <div id="createMsg" style="margin-left:8px;color:var(--muted)"></div>
 </div>
@@ -161,8 +190,15 @@ button:hover{filter:brightness(1.08)}
 </div>
 
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-const APP_URL = 'https://script.google.com/macros/s/AKfycbwbrozFCFyWAgkKqxhKUyBc42HsNSh_0JdDPB0NvH5wlcnZY35KEMPdyeHWNgnrOhi8/exec';
+// ====== Supabase config ======
+// The anon key is SAFE to expose in the client: Row Level Security is enabled
+// (see supabase-setup.sql), so the key only grants the policies defined there.
+const SUPABASE_URL = 'https://tkpkheoooqvintupbqzd.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRrcGtoZW9vb3F2aW50dXBicXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMjUzMTksImV4cCI6MjA5NTkwMTMxOX0.wK2ZpN0YwL0BK5QQl6_1mmpqPJ_J81hJ4FbthCZngHc';
+const IMAGE_BUCKET = 'entry-images';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // === BEGIN player ID persistence ===
 function getPlayerId() {
@@ -224,15 +260,100 @@ function getSavedBracket(code){
 }
 // === END localStorage helpers for picks ===
 
-// === helpers: no custom headers → no preflight, plain body ===
-async function apiGet(params){
-const url = APP_URL + '?' + new URLSearchParams(params).toString();
-const r = await fetch(url);
-return r.json();
+// === Supabase data layer (replaces the old Apps Script apiGet/apiPost) ===
+
+// 5-char base36 share code (ported from the old AppScript genCode()).
+function genCode(){
+  const n = Date.now() + Math.floor(Math.random()*1e6);
+  return n.toString(36).toUpperCase().slice(-5);
 }
-async function apiPost(payload){
-const r = await fetch(APP_URL, { method:'POST', body: JSON.stringify(payload) });
-try { return await r.json(); } catch { return {ok:true}; }
+
+// Normalize an entry to { name, img }. Tolerates legacy plain-string entries.
+function normEntry(e){
+  if (e == null) return null;
+  if (typeof e === 'string') return { name: e, img: null };
+  if (typeof e.name === 'string') return { name: e.name, img: e.img || null };
+  return null;
+}
+
+async function fetchSet(code){
+  const { data, error } = await sb.from('sets')
+    .select('code, question, entries').eq('code', code).maybeSingle();
+  if (error || !data) return { ok:false, error:'NOT_FOUND' };
+  const entries = (data.entries || []).map(normEntry).filter(Boolean);
+  return { ok:true, code:data.code, question:data.question, entries };
+}
+
+async function fetchMyPicks(code, playerId){
+  if (!code || !playerId) return { ok:true, found:false };
+  const { data, error } = await sb.from('picks')
+    .select('bracket, ranking').eq('code', code).eq('player_id', playerId).maybeSingle();
+  if (error || !data) return { ok:true, found:false };
+  return { ok:true, found:true, bracket:data.bracket, ranking:data.ranking || [] };
+}
+
+// Aggregation ported from the old AppScript doGet 'stats'.
+async function fetchStats(code){
+  const { data, error } = await sb.from('picks').select('score, ranking').eq('code', code);
+  if (error) return { ok:false };
+  if (!data || !data.length) return { ok:true, code, total:0, aggregate:[] };
+
+  const aggScores = new Map();
+  const rankTallies = new Map(); // entry -> list of ranks
+  data.forEach(r => {
+    for (const [k,v] of Object.entries(r.score || {})) {
+      aggScores.set(k, (aggScores.get(k)||0) + Number(v||0));
+    }
+    (r.ranking || []).forEach((entry, i) => {
+      const arr = rankTallies.get(entry) || [];
+      arr.push(i+1); // 1-based rank
+      rankTallies.set(entry, arr);
+    });
+  });
+
+  const aggregate = Array.from(aggScores.entries()).map(([entry, totalScore]) => {
+    const ranks = rankTallies.get(entry) || [];
+    const avgRank = ranks.length ? (ranks.reduce((a,b)=>a+b,0)/ranks.length) : null;
+    return { entry, totalScore, avgRank, samples: ranks.length };
+  }).sort((a,b)=> (b.totalScore - a.totalScore) || ((a.avgRank||1e9) - (b.avgRank||1e9)) );
+
+  return { ok:true, code, total: data.length, aggregate };
+}
+
+async function fetchBrowse(){
+  const { data, error } = await sb.from('sets')
+    .select('code, question, entries, created_at')
+    .order('created_at', { ascending:false }).limit(50);
+  if (error) return { ok:false };
+  const rows = (data || []).map(r => ({
+    code: r.code,
+    question: r.question,
+    entries: (r.entries || []).map(normEntry).filter(Boolean),
+    created_at: r.created_at
+  }));
+  return { ok:true, rows };
+}
+
+// Insert a new set, retrying on code collision (Postgres unique-violation 23505).
+async function createSet(question, entries){
+  for (let i=0; i<5; i++){
+    const code = genCode();
+    const { error } = await sb.from('sets').insert({ code, question, entries });
+    if (!error) return { ok:true, code };
+    if (error.code !== '23505') return { ok:false, error: error.message };
+  }
+  return { ok:false, error:'Could not generate a unique code.' };
+}
+
+async function submitPicks(code, playerId, bracket, ranking, scores){
+  const { data, error } = await sb.from('picks')
+    .insert({ code, player_id:playerId, bracket, ranking, score:scores })
+    .select('pick_id').single();
+  if (error) {
+    // 23505 = already submitted (unique on code, player_id)
+    return { ok:false, error: error.message, code: error.code, duplicate: error.code === '23505' };
+  }
+  return { ok:true, pick_id: data.pick_id };
 }
 
 
@@ -317,7 +438,7 @@ return rounds; // rounds[0] leaves, rounds[last] root array of size 1
 }
 
 
-function renderBracket(rootEl, data, fromSaved, readOnly = false){
+function renderBracket(rootEl, data, fromSaved, readOnly = false, imgByName = {}){
   rootEl.innerHTML='';
 
   // === BEGIN support for saved bracket cols ===
@@ -362,6 +483,26 @@ function renderBracket(rootEl, data, fromSaved, readOnly = false){
     return String(node.entry ?? '');
   }
 
+  // Build an .entry element with an optional image thumbnail (looked up by name).
+  function makeEntry(name){
+    const div = document.createElement('div');
+    div.className = 'entry';
+    const img = name ? imgByName[name] : null;
+    if (img) {
+      const im = document.createElement('img');
+      im.className = 'entry-img';
+      im.src = img;
+      im.alt = name;
+      im.loading = 'lazy';
+      div.appendChild(im);
+    }
+    const span = document.createElement('span');
+    span.className = 'entry-name';
+    span.textContent = name;
+    div.appendChild(span);
+    return div;
+  }
+
   function placeWinner(roundIdx, matchIdx, winnerLabel){
     const nextCol = cols[roundIdx + 1];
     if (!nextCol) return;                          // no next round
@@ -383,8 +524,8 @@ function renderBracket(rootEl, data, fromSaved, readOnly = false){
   const col = document.createElement('div'); col.className='round';
   matches.forEach((m, i)=>{
   const card = document.createElement('div'); card.className='match';
-  const e1 = document.createElement('div'); e1.className='entry'; e1.textContent = label(m.a);
-  const e2 = document.createElement('div'); e2.className='entry'; e2.textContent = label(m.b);
+  const e1 = makeEntry(label(m.a));
+  const e2 = makeEntry(label(m.b));
 
 
   if (isBye(m.a) && hasEntry(m.b)) m.pick = 'b';
@@ -431,9 +572,8 @@ function renderBracket(rootEl, data, fromSaved, readOnly = false){
       (m.pick === 'b' && bHas) ? label(m.b) :
       aHas ? label(m.a) : bHas ? label(m.b) : '';
 
-    const single = document.createElement('div');
-    single.className = 'entry win';
-    single.textContent = winnerName || '';
+    const single = makeEntry(winnerName || '');
+    single.classList.add('win');
     card.appendChild(single);
   } else {
     // normal: show both sides so user can click a final
@@ -585,7 +725,8 @@ const submitBtn = document.getElementById('submitBtn');
 const playMsg = document.getElementById('playMsg');
 const createBtn = document.getElementById('createBtn');
 const createMsg = document.getElementById('createMsg');
-const entriesEl = document.getElementById('entries');
+const entryListEl = document.getElementById('entryList');
+const addEntryBtn = document.getElementById('addEntryBtn');
 const questionEl = document.getElementById('question');
 const browseCard = document.getElementById('browseCard');
 const recentEl = document.getElementById('recent');
@@ -596,12 +737,17 @@ function show(id, vis){ document.getElementById(id).style.display = vis ? 'block
 
 
 async function loadCode(code){
-const res = await apiGet({action:'fetch_set', code});
+const res = await fetchSet(code);
 if (!res.ok) { playMsg.textContent='Code not found.'; return; }
 show('createCard', false);
 show('playCard', true);
 show('statsCard', true);
 qText.textContent = res.question || code;
+
+// Map entry name -> image URL, used only at render time.
+const imgByName = {};
+(res.entries || []).forEach(e => { if (e && e.name) imgByName[e.name] = e.img || null; });
+const entryNames = (res.entries || []).map(e => e.name);
 
 let ui;
 let alreadySubmitted = false;
@@ -612,7 +758,7 @@ const savedRanking = getSavedRanking(code);
 
 if (hasSubmitted(code) && savedBracket) {
   // User has submitted from this device - show their bracket in read-only mode
-  ui = renderBracket(bracketEl, savedBracket, true, true);
+  ui = renderBracket(bracketEl, savedBracket, true, true, imgByName);
   bracketEl.classList.add('readonly');
   reviewBanner.style.display = 'flex';
   alreadySubmitted = true;
@@ -627,10 +773,10 @@ if (hasSubmitted(code) && savedBracket) {
 } else {
   // Try to fetch from server (in case user submitted from another device)
   try {
-    const mine = await apiGet({ action:'my_picks', code, player_id: PLAYER_ID });
+    const mine = await fetchMyPicks(code, PLAYER_ID);
     if (mine.ok && mine.found && mine.bracket) {
       // Rebuild the same matchups and auto-apply picks in read-only mode
-      ui = renderBracket(bracketEl, mine.bracket, true, true);
+      ui = renderBracket(bracketEl, mine.bracket, true, true, imgByName);
       bracketEl.classList.add('readonly');
       reviewBanner.style.display = 'flex';
       alreadySubmitted = true;
@@ -648,14 +794,14 @@ if (hasSubmitted(code) && savedBracket) {
     } else {
       // No previous picks: build a fresh random bracket
       const seedStr = `${code}:${Date.now()}:${Math.random()}`;
-      const rounds = buildBracket(res.entries, seedStr);
-      ui = renderBracket(bracketEl, rounds, false, false);
+      const rounds = buildBracket(entryNames, seedStr);
+      ui = renderBracket(bracketEl, rounds, false, false, imgByName);
     }
   } catch (e) {
     // If my_picks fails for any reason, fall back to a fresh bracket
     const seedStr = `${code}:${Date.now()}:${Math.random()}`;
-    const rounds = buildBracket(res.entries, seedStr);
-    ui = renderBracket(bracketEl, rounds, false, false);
+    const rounds = buildBracket(entryNames, seedStr);
+    ui = renderBracket(bracketEl, rounds, false, false, imgByName);
   }
 }
 
@@ -692,15 +838,21 @@ submitBtn.onclick = async () => {
 
   const bracketCols = ui.serialize();
   const scores = scoreFromRanking(ranking, bracketCols);
-  const payload = { action:'submit_picks', code, player_id: PLAYER_ID, bracket: bracketCols, ranking, scores };
 
-  const out = await apiPost(payload);
+  const out = await submitPicks(code, PLAYER_ID, bracketCols, ranking, scores);
   if (out.ok) {
     rememberPicks(code, ranking, bracketCols); // store locally with bracket
     playMsg.textContent=`Submitted! Your picks: ${ranking.join(' → ')}`;
     submitBtn.textContent = 'View Your Picks';
     show('statsCard', true);
-    const agg = await apiGet({action:'stats', code});
+    const agg = await fetchStats(code);
+    renderStats(agg);
+  } else if (out.duplicate) {
+    // Already submitted (server-side unique constraint) — treat as success.
+    rememberPicks(code, ranking, bracketCols);
+    playMsg.textContent=`You already submitted: ${ranking.join(' → ')}`;
+    submitBtn.textContent = 'View Your Picks';
+    const agg = await fetchStats(code);
     renderStats(agg);
   } else {
     playMsg.textContent='Submit failed.';
@@ -711,7 +863,7 @@ submitBtn.onclick = async () => {
 
 
 
-const agg = await apiGet({action:'stats', code});
+const agg = await fetchStats(code);
 renderStats(agg);
 }
 
@@ -731,12 +883,122 @@ await loadCode(code);
 };
 
 
+// === Create-bracket entry rows (name + image upload/URL) ===
+let entryRows = []; // [{ id, name, file, url, objectUrl }]
+
+function newRowId(){
+  return (crypto.randomUUID ? crypto.randomUUID()
+    : 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+}
+
+function setRowFile(row, file){
+  if (row.objectUrl) { URL.revokeObjectURL(row.objectUrl); row.objectUrl = null; }
+  row.file = file || null;
+  row.objectUrl = file ? URL.createObjectURL(file) : null;
+  if (file) row.url = ''; // an uploaded file wins over a pasted URL
+  renderEntryRows();
+}
+
+function rowThumbSrc(row){
+  return row.objectUrl || (row.url && row.url.trim()) || null;
+}
+
+function renderEntryRows(){
+  entryListEl.innerHTML = '';
+  entryRows.forEach(row => {
+    const el = document.createElement('div');
+    el.className = 'entry-row';
+
+    const thumb = document.createElement('img');
+    thumb.className = 'thumb';
+    const src = rowThumbSrc(row);
+    if (src) thumb.src = src; else thumb.style.visibility = 'hidden';
+
+    const name = document.createElement('input');
+    name.className = 'name';
+    name.placeholder = 'Entry name';
+    name.value = row.name;
+    name.oninput = () => { row.name = name.value; };
+
+    const fileBtn = document.createElement('button');
+    fileBtn.type = 'button';
+    fileBtn.className = 'filebtn';
+    fileBtn.textContent = row.file ? '✓ Image' : '📷 Upload';
+
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/png,image/jpeg,image/webp,image/gif';
+    fileInput.style.display = 'none';
+    fileInput.onchange = () => { if (fileInput.files[0]) setRowFile(row, fileInput.files[0]); };
+    fileBtn.onclick = () => fileInput.click();
+
+    const url = document.createElement('input');
+    url.type = 'url';
+    url.className = 'url';
+    url.placeholder = '…or paste image URL';
+    url.value = row.url;
+    url.disabled = !!row.file;
+    url.oninput = () => { row.url = url.value; thumb.style.visibility = rowThumbSrc(row) ? 'visible' : 'hidden'; thumb.src = rowThumbSrc(row) || ''; };
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'removebtn';
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove entry';
+    removeBtn.onclick = () => {
+      if (row.objectUrl) URL.revokeObjectURL(row.objectUrl);
+      entryRows = entryRows.filter(r => r.id !== row.id);
+      renderEntryRows();
+    };
+
+    // Drag & drop an image file onto the row
+    el.ondragover = (e) => { e.preventDefault(); el.classList.add('dragover'); };
+    el.ondragleave = () => el.classList.remove('dragover');
+    el.ondrop = (e) => {
+      e.preventDefault(); el.classList.remove('dragover');
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f && f.type.startsWith('image/')) setRowFile(row, f);
+    };
+
+    el.append(thumb, name, fileBtn, fileInput, url, removeBtn);
+    entryListEl.appendChild(el);
+  });
+}
+
+function addEntryRow(){
+  entryRows.push({ id: newRowId(), name: '', file: null, url: '', objectUrl: null });
+  renderEntryRows();
+}
+
+addEntryBtn.onclick = () => addEntryRow();
+
+function extFor(file){
+  const fromType = { 'image/png':'png', 'image/jpeg':'jpg', 'image/webp':'webp', 'image/gif':'gif' }[file.type];
+  if (fromType) return fromType;
+  const m = /\.([a-z0-9]+)$/i.exec(file.name || '');
+  return m ? m[1].toLowerCase() : 'img';
+}
+
+// Seed the create form with a couple of blank rows.
+addEntryRow();
+addEntryRow();
+
+
 createBtn.onclick = async ()=>{
   if (createBtn.disabled) return; // guard
-  const question = (questionEl.value||'').trim();
-  const entries = (entriesEl.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  if (entries.length < 2) {
-    createMsg.textContent = 'Need at least two entries.';
+  const question = (questionEl.value||'').trim().slice(0, 200);
+
+  // Collect named rows, dedupe by name (first occurrence wins).
+  const seen = new Set();
+  const rows = [];
+  for (const row of entryRows) {
+    const nm = (row.name||'').trim();
+    if (!nm || seen.has(nm)) continue;
+    seen.add(nm);
+    rows.push(row);
+  }
+  if (rows.length < 2) {
+    createMsg.textContent = 'Need at least two entries (with names).';
     return;
   }
 
@@ -744,17 +1006,36 @@ createBtn.onclick = async ()=>{
   const originalText = createBtn.textContent;
   createBtn.textContent = 'Creating…';
 
-  const out = await apiPost({action:'create_set', question, entries});
-  if (out.ok){
+  try {
+    const entries = [];
+    for (let k = 0; k < rows.length; k++) {
+      const row = rows[k];
+      let img = null;
+      if (row.file) {
+        createMsg.textContent = `Uploading images… (${k+1}/${rows.length})`;
+        const path = `entries/${newRowId()}.${extFor(row.file)}`;
+        const { error: upErr } = await sb.storage.from(IMAGE_BUCKET)
+          .upload(path, row.file, { contentType: row.file.type, upsert: false });
+        if (upErr) throw new Error('Image upload failed: ' + upErr.message);
+        img = sb.storage.from(IMAGE_BUCKET).getPublicUrl(path).data.publicUrl;
+      } else if ((row.url||'').trim()) {
+        img = row.url.trim();
+      }
+      entries.push({ name: row.name.trim(), img });
+    }
+
+    createMsg.textContent = 'Creating bracket…';
+    const out = await createSet(question, entries);
+    if (!out.ok) throw new Error(out.error || 'Failed to create.');
+
     createMsg.innerHTML = `Code: <b>${out.code}</b> — share this!`;
     codeInput.value = out.code;
-    // (optional) remember created bracket locally
     try {
       localStorage.setItem(`br_created_${out.code}`, JSON.stringify({question, entries}));
     } catch(e){}
     await loadCode(out.code);
-  } else {
-    createMsg.textContent = out.error || 'Failed to create.';
+  } catch (e) {
+    createMsg.textContent = e.message || 'Failed to create.';
     createBtn.disabled = false;
     createBtn.textContent = originalText;
   }
@@ -762,7 +1043,7 @@ createBtn.onclick = async ()=>{
 
 
 browseBtn.onclick = async ()=>{
-const res = await apiGet({action:'browse'});
+const res = await fetchBrowse();
 if (!res.ok){ return; }
 browseCard.style.display='block';
 recentEl.innerHTML = res.rows.map(r=>`<li style="margin:6px 0"><a href="#" data-code="${r.code}"><b>${r.question||r.code}</b></a> <span style="color:var(--muted)">(${r.entries.length} entries)</span></li>`).join('');
