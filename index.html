@@ -119,11 +119,15 @@ button:hover{filter:brightness(1.08)}
 
 /* Fullscreen image lightbox */
 .lightbox {
-  position: fixed; inset: 0; z-index: 1000;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  width: 100%; height: 100%;
+  z-index: 1000;
   background: rgba(3, 6, 18, 0.92);
   display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 14px;
   padding: 24px; cursor: zoom-out;
+  overscroll-behavior: contain;
 }
 .lightbox img {
   max-width: 92vw; max-height: 82vh;
@@ -767,10 +771,12 @@ function openLightbox(src, caption){
   lightboxImg.alt = caption || '';
   lightboxCaption.textContent = caption || '';
   lightbox.style.display = 'flex';
+  document.body.style.overflow = 'hidden'; // lock background scroll while open
 }
 function closeLightbox(){
   lightbox.style.display = 'none';
   lightboxImg.removeAttribute('src');
+  document.body.style.overflow = '';
 }
 lightbox.onclick = closeLightbox;
 document.addEventListener('keydown', (e)=>{
