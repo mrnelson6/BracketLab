@@ -766,17 +766,42 @@ const reviewBanner = document.getElementById('reviewBanner');
 const lightbox = document.getElementById('lightbox');
 const lightboxImg = document.getElementById('lightboxImg');
 const lightboxCaption = document.getElementById('lightboxCaption');
+// position:fixed anchors to the LAYOUT viewport; under pinch-zoom the visible
+// (VISUAL) viewport is a smaller, panned subset. Pin + counter-scale the overlay
+// to the visual viewport so it always covers exactly what the user sees.
+function positionLightbox(){
+  const vv = window.visualViewport;
+  if (!vv) return; // older browsers: CSS full-screen fallback applies
+  lightbox.style.transformOrigin = '0 0';
+  lightbox.style.width  = (vv.width  * vv.scale) + 'px'; // == layout viewport size
+  lightbox.style.height = (vv.height * vv.scale) + 'px';
+  lightbox.style.transform =
+    `translate(${vv.offsetLeft}px, ${vv.offsetTop}px) scale(${1 / vv.scale})`;
+}
 function openLightbox(src, caption){
   lightboxImg.src = src;
   lightboxImg.alt = caption || '';
   lightboxCaption.textContent = caption || '';
   lightbox.style.display = 'flex';
   document.body.style.overflow = 'hidden'; // lock background scroll while open
+  positionLightbox();
+  if (window.visualViewport){
+    window.visualViewport.addEventListener('resize', positionLightbox);
+    window.visualViewport.addEventListener('scroll', positionLightbox);
+  }
 }
 function closeLightbox(){
   lightbox.style.display = 'none';
   lightboxImg.removeAttribute('src');
   document.body.style.overflow = '';
+  // clear inline overrides so the CSS fallback applies next time
+  lightbox.style.transform = '';
+  lightbox.style.width = '';
+  lightbox.style.height = '';
+  if (window.visualViewport){
+    window.visualViewport.removeEventListener('resize', positionLightbox);
+    window.visualViewport.removeEventListener('scroll', positionLightbox);
+  }
 }
 lightbox.onclick = closeLightbox;
 document.addEventListener('keydown', (e)=>{
