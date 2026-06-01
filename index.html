@@ -320,30 +320,45 @@ async function fetchMyPicks(code, playerId){
   return { ok:true, found:true, bracket:data.bracket, ranking:data.ranking || [] };
 }
 
-// Aggregation ported from the old AppScript doGet 'stats'.
+// Aggregate stats: total score plus head-to-head win rate.
+// Win rate counts every decided real-vs-real matchup across all submitted
+// brackets, so it's independent of the random bracket seeding.
 async function fetchStats(code){
-  const { data, error } = await sb.from('picks').select('score, ranking').eq('code', code);
+  const { data, error } = await sb.from('picks').select('score, bracket').eq('code', code);
   if (error) return { ok:false };
   if (!data || !data.length) return { ok:true, code, total:0, aggregate:[] };
 
   const aggScores = new Map();
-  const rankTallies = new Map(); // entry -> list of ranks
+  const wins = new Map();     // entry -> matchups won
+  const matchups = new Map(); // entry -> matchups played (excludes byes)
+
+  const nameOf = (node) => (node && node.entry != null) ? String(node.entry) : null;
+  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+
   data.forEach(r => {
     for (const [k,v] of Object.entries(r.score || {})) {
       aggScores.set(k, (aggScores.get(k)||0) + Number(v||0));
     }
-    (r.ranking || []).forEach((entry, i) => {
-      const arr = rankTallies.get(entry) || [];
-      arr.push(i+1); // 1-based rank
-      rankTallies.set(entry, arr);
-    });
+    const cols = Array.isArray(r.bracket) ? r.bracket : [];
+    cols.forEach(round => (round || []).forEach(m => {
+      const a = nameOf(m && m.a), b = nameOf(m && m.b);
+      // Only real head-to-heads the voter decided (skip byes / pending).
+      if (a && b && (m.pick === 'a' || m.pick === 'b')) {
+        const winner = m.pick === 'a' ? a : b;
+        const loser  = m.pick === 'a' ? b : a;
+        bump(wins, winner);
+        bump(matchups, winner);
+        bump(matchups, loser);
+      }
+    }));
   });
 
   const aggregate = Array.from(aggScores.entries()).map(([entry, totalScore]) => {
-    const ranks = rankTallies.get(entry) || [];
-    const avgRank = ranks.length ? (ranks.reduce((a,b)=>a+b,0)/ranks.length) : null;
-    return { entry, totalScore, avgRank, samples: ranks.length };
-  }).sort((a,b)=> (b.totalScore - a.totalScore) || ((a.avgRank||1e9) - (b.avgRank||1e9)) );
+    const played = matchups.get(entry) || 0;
+    const won = wins.get(entry) || 0;
+    const winRate = played ? won / played : null;
+    return { entry, totalScore, winRate, matchups: played, wins: won };
+  }).sort((a,b)=> (b.totalScore - a.totalScore) || ((b.winRate||-1) - (a.winRate||-1)) );
 
   return { ok:true, code, total: data.length, aggregate };
 }
@@ -948,7 +963,12 @@ function renderStats(agg){
 const box = document.getElementById('stats');
 if (!agg.ok){ box.textContent='No stats yet.'; return; }
 const rows = agg.aggregate||[];
-box.innerHTML = rows.map((r,i)=>`<div>${i+1}. <b>${r.entry}</b> — total score ${r.totalScore} ${r.avgRank?`(avg rank ${r.avgRank.toFixed(2)})`:''} · n=${r.samples}</div>`).join('');
+box.innerHTML = rows.map((r,i)=>{
+  const wr = (r.winRate != null)
+    ? `win rate ${Math.round(r.winRate*100)}% (${r.matchups} matchup${r.matchups===1?'':'s'})`
+    : 'no matchups yet';
+  return `<div>${i+1}. <b>${r.entry}</b> — total score ${r.totalScore} · ${wr}</div>`;
+}).join('');
 }
 
 
