@@ -200,7 +200,7 @@ button:hover{filter:brightness(1.08)}
 
 
 <div id="statsCard" class="card" style="display:none">
-<h2>📊 Aggregate stats</h2>
+<h2 id="statsTitle">📊 Aggregate stats</h2>
 <div id="stats"></div>
 </div>
 
@@ -961,6 +961,11 @@ renderStats(agg);
 
 function renderStats(agg){
 const box = document.getElementById('stats');
+const title = document.getElementById('statsTitle');
+const n = (agg && agg.total) || 0;
+title.textContent = n
+  ? `📊 Aggregate stats — ${n} ${n===1?'person':'people'} filled this out`
+  : '📊 Aggregate stats';
 if (!agg.ok){ box.textContent='No stats yet.'; return; }
 const rows = agg.aggregate||[];
 box.innerHTML = rows.map((r,i)=>{
